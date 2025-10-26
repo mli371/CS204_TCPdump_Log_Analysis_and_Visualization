@@ -1,0 +1,19 @@
+name: CS204
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pandas
+  - numpy
+  - requests
+  - click
+  - pyopenssl
+  - cryptography
+  - pip:
+      - scapy
+      - pyshark
+      - plotly
+      - watchdog
+      - dpkt
