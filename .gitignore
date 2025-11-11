@@ -1,0 +1,13 @@
+.venv
+venv/
+__pycache__/
+.pytest_cache/
+artifacts/
+tcpviz-links/
+scripts/*.pyc
+scripts/*.log
+*.pcapng
+pip-wheel-metadata/
+build/
+dist/
+*.egg-info/

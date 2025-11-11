@@ -8,7 +8,7 @@ from typing import Iterable, List
 
 import plotly.express as px
 
-from tcpviz.src.logging_utils import get_logger
+from src.logging_utils import get_logger
 
 LOGGER = get_logger(__name__)
 

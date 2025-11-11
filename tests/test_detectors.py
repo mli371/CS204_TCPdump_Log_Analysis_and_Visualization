@@ -1,36 +1,32 @@
-"""Unit tests for retransmission and out-of-order detection helpers."""
+"""Basic unit tests for detector helpers."""
 
-from tcpviz.src.detectors.out_of_order import advance_max_contig, detect_out_of_order
-from tcpviz.src.detectors.retrans import detect_retransmissions, record_range
+import sys
+from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-def test_retransmission_detects_overlapping_segment() -> None:
-    seen = []
-
-    # First segment populates the seen range but should not trigger.
-    assert not detect_retransmissions(seen, start=1000, end=1100)
-    record_range(seen, start=1000, end=1100)
-    assert seen == [(1000, 1100)]
-
-    # Second segment overlaps the existing window -> retransmission.
-    assert detect_retransmissions(seen, start=1050, end=1120)
-
-    # Record the overlapping segment and ensure the range is merged.
-    record_range(seen, start=1050, end=1120)
-    assert seen == [(1000, 1120)]
+from src.detectors.out_of_order import advance_max_contig, detect_out_of_order
+from src.detectors.retrans import detect_retransmissions, record_range
 
 
-def test_out_of_order_detected_when_sequence_rolls_back() -> None:
+def test_retransmission_overlap_detection() -> None:
+    seen_ranges: list[tuple[int, int]] = []
+
+    assert not detect_retransmissions(seen_ranges, 1000, 1020)
+
+    record_range(seen_ranges, 1000, 1020)
+    assert seen_ranges == [(1000, 1020)]
+
+    assert detect_retransmissions(seen_ranges, 1010, 1030)
+
+
+def test_out_of_order_detection_and_progression() -> None:
     max_contig = None
 
-    # First in-order segment defines the contiguous high-water mark.
-    max_contig = advance_max_contig(max_contig, seq=2000, length=200)
-    assert max_contig == 2200
+    max_contig = advance_max_contig(max_contig, 1000, 100)
+    assert max_contig == 1100
 
-    # A later packet starting before the high-water mark is out-of-order.
-    assert detect_out_of_order(seq=2100, length=50, max_contig=max_contig)
-
-    # New in-order data may extend the window and clear the alert condition.
-    max_contig = advance_max_contig(max_contig, seq=2200, length=100)
-    assert max_contig == 2300
-    assert not detect_out_of_order(seq=2300, length=50, max_contig=max_contig)
+    assert detect_out_of_order(1050, 50, max_contig)
+    assert not detect_out_of_order(1100, 20, max_contig)

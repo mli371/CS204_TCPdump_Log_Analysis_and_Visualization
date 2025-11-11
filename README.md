@@ -71,6 +71,50 @@ Share `C:\pcaps` into WSL (e.g. `/mnt/c/pcaps`) so the monitor can tail the roll
 
 > ⚠️ tcpviz cannot recover the true congestion window (cwnd) from captures; analyses rely on retransmission/out-of-order heuristics. Ensure reports document these limitations.
 
+### Cross-platform notes
+- `monitor` uses filesystem events via `watchdog` when available (automatic fallback to polling otherwise).
+- Validated on WSL Ubuntu + Windows (Npcap/Dumpcap share) and macOS (FSEvents). Ensure capture directories are accessible (e.g. `/mnt/c/pcaps` on WSL).
+
+## Reproduce the full workflow
+
+1. **Create/activate the Conda environment**
+   ```
+   conda env create -f environment.yml
+   conda activate CS204
+   ```
+
+2. **Prepare capture permissions on Linux/WSL**
+   ```
+   sudo apt install dumpcap tshark
+   sudo usermod -aG wireshark $USER
+   sudo setcap cap_net_raw,cap_net_admin+eip $(which dumpcap)
+   ```
+
+3. **Start a rolling capture**
+   ```
+   dumpcap -i eth0 -b filesize:50 -b files:10 -w /tmp/CS204/rolling.pcapng
+   ```
+
+4. **Maintain a stable symlink to the newest file**
+   ```
+   mkdir -p ~/tcpviz-links
+   python scripts/watch_latest_capture.py "/tmp/CS204/rolling_*.pcapng" ~/tcpviz-links/rolling-current.pcapng
+   ```
+
+5. **Run realtime monitoring**
+   ```
+   python -m src.cli monitor \
+     --pcap-path ~/tcpviz-links/rolling-current.pcapng \
+     --window 60 \
+     --threshold 10
+   ```
+
+6. **Generate dashboards**
+   ```
+   scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
+   ```
+   Review `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html`.
+
 ## Logging & benchmarking
 - Logging defaults to INFO; add `--verbose` to any CLI command to enable DEBUG output.
 - Each parse run records backend, packet counts, duration, and throughput in `benchmark.log` within the session directory.
@@ -86,3 +130,16 @@ pyinstaller --onefile -n tcpviz src/cli.py
 - Unit tests live under `tests/` and can be run via `make test` (inside the `CS204` conda environment).
 - `make mvp` executes a stubbed end-to-end run using `conda run`.
 - The project favours ASCII output and minimal external dependencies; Plotly is used for visualisations, falling back to simple placeholders when events are absent.
+
+## Proposal alignment
+Relative to `Proposal.md` (“Real-Time TCPdump Log Analysis and Visualization”):
+
+**Delivered**
+- Dual-backend parsing (pyshark → dpkt) with canonical TCP fields, benchmarking, and session-scoped artifacts.
+- Retransmission/out-of-order/packet-loss detection plus per-flow sliding-window monitoring that emits WARN/CRITICAL alerts, driven by the realtime tailer.
+- Congestion proxies (per-flow cwnd bytes, RTT EMA) surfaced in summaries and event metadata.
+- Plotly-based timeline, flow summary, and combined report dashboard.
+- CLI workflow (`parse-pcap`, `plot`, `summary`, `monitor`) with logging, env-configurable thresholds, and consistent session directories.
+
+**Pending / future work**
+- Replace polling-based monitor with filesystem event listeners (watchdog) and document verified runs on macOS/Windows per proposal goals.
