@@ -1,145 +1,124 @@
 # tcpviz
 
-`tcpviz` is an experimental toolkit for analysing TCP captures (pcap/pcapng) with a focus on retransmission and out-of-order behaviour. It ships a CLI that can parse captures into canonical JSONL events, detect anomalies, render visualisations, and perform near real-time monitoring on rolling capture files.
+`tcpviz` is a Python toolkit for analysing TCP captures (pcap/pcapng) with an emphasis on retransmission, inferred packet loss, and out-of-order behaviour. The CLI normalises packets into JSONL events, detects anomalies, renders Plotly dashboards, and tails rolling captures for near real-time alerting.
 
-## Key features
-- **Canonical event extraction** via pyshark (preferred) or dpkt, with automatic backend fallback and per-run benchmarking.
-- **Detectors and monitoring** that track retransmissions and sequence reordering per flow, emitting severity-graded alerts in sliding windows.
-- **Visual dashboards**: interactive timeline, per-flow summary chart, and a combined HTML report.
-- **CLI-first workflow** with logging (INFO by default, DEBUG with `--verbose`) and configurable thresholds/polling through CLI options or env vars.
+## Feature highlights
+- **Dual-backend parsing** (pyshark → dpkt fallback) with per-run benchmarking, backend selection, and skipped-packet tracking.
+- **Detectors & congestion proxies**: retransmission/out-of-order/loss inference plus cwnd/RTT estimators exposed in event metadata and summaries.
+- **Realtime monitoring**: sliding-window WARN/CRITICAL alerts, watchdog-based tailer, configurable thresholds and poll intervals.
+- **Visual workflow**: Plotly timeline, per-flow summary, combined dashboard (timeline + summary) generated via helper script.
+- **CLI-first tooling**: `parse-pcap`, `plot`, `summary`, `monitor`, and automation scripts (`watch_latest_capture.py`, `generate_dashboard.sh`).
 
-## Environment & prerequisites
+## Environment setup
 
-### System setup (WSL Ubuntu)
-```
-sudo apt update && sudo apt install tshark tcpdump
+### System prerequisites (Ubuntu/WSL)
+```bash
+sudo apt update && sudo apt install tshark tcpdump dumpcap
 sudo usermod -aG wireshark $USER
 newgrp wireshark
-tshark -v
+sudo setcap cap_net_raw,cap_net_admin+eip $(which dumpcap)
 ```
+(Windows 使用 Npcap/Dumpcap；macOS 需启用 FSEvents 监听权限。)
 
 ### Conda environment
-```
+```bash
 conda env create -f environment.yml
 conda activate CS204
 ```
 
-## Command overview
+## Routine commands
+All commands below assume `pwd` is the repo root `tcpviz/`.
 
-All commands are meant to be executed from the repository root.
-
-### Parsing and visualisations
-```
-# Parse capture into JSONL events and benchmark the backend
+### Parsing & visualisation
+```bash
 python -m src.cli parse-pcap --in samples/test.pcapng
-
-# Render timeline (Plotly scatter) into the session artifacts directory
 python -m src.cli plot --in artifacts/session_*/events.jsonl
-
-# Render per-flow retransmission/out-of-order summary chart
 python -m src.cli summary --in artifacts/session_*/events.jsonl
 ```
-Each command writes outputs under `artifacts/session_YYYYmmdd_HHMM/`, printing paths to stdout.
+Each command writes into `artifacts/session_YYYYmmdd_HHMM/` and prints the exact paths.
 
-### Combined dashboard
-```
+### Combined dashboard (manual)
+```bash
 python - <<'PY'
 from pathlib import Path
-from tcpviz.src.viz.report import generate_report
+from src.viz.report import generate_report
 latest = sorted(Path('artifacts').glob('session_*'))[-1]
 print(generate_report(latest / 'events.jsonl'))
 PY
 ```
-This produces `report.html`, combining the timeline and summary charts.
+Outputs `report.html` next to the timeline/summary.
 
-### Near real-time monitoring
-```
+### Realtime monitor
+```bash
 python -m src.cli monitor \
-  --pcap-path /mnt/c/pcaps/rolling.pcapng \
+  --pcap-path /path/to/rolling.pcapng \
   --window 60 \
   --threshold 10 \
   --poll-interval 2.0
 ```
-Environment variables `TCPVIZ_WINDOW`, `TCPVIZ_THRESHOLD`, and `TCPVIZ_POLL_INTERVAL` can override the defaults. Sliding window alerts emit `[WARN]` (10–49), `[CRITICAL]` (≥50), or `[ALERT]` (custom threshold) levels with optional ANSI colour.
+Environment variables `TCPVIZ_WINDOW`, `TCPVIZ_THRESHOLD`, `TCPVIZ_POLL_INTERVAL` override defaults. Sliding window alerts emit `[WARN]` (10–49), `[CRITICAL]` (≥50) severities (ANSI colours optional).
 
-### Rolling capture on Windows (PowerShell)
-```
+## Rolling capture workflow (recommended)
+1. **Start a rolling capture** (Linux/WSL example):
+   ```bash
+   dumpcap -i eth0 -b filesize:50 -b files:10 -w /tmp/CS204/rolling.pcapng
+   ```
+2. **Maintain a stable symlink** to the newest file:
+   ```bash
+   mkdir -p ~/tcpviz-links
+   python scripts/watch_latest_capture.py \
+     "/tmp/CS204/rolling_*.pcapng" \
+     ~/tcpviz-links/rolling-current.pcapng
+   ```
+3. **Run the monitor** against the symlink:
+   ```bash
+   python -m src.cli monitor \
+     --pcap-path ~/tcpviz-links/rolling-current.pcapng \
+     --window 60 --threshold 10
+   ```
+4. **Generate dashboards** from the same capture:
+   ```bash
+   scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
+   ```
+   Open `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html` in a browser.
+
+### Windows capture handoff
+```powershell
 tshark -D
 dumpcap -i <ID> -b filesize:50 -b files:10 -w C:\pcaps\rolling.pcapng
 ```
-Share `C:\pcaps` into WSL (e.g. `/mnt/c/pcaps`) so the monitor can tail the rolling file.
+Share `C:\pcaps` into WSL (e.g. `/mnt/c/pcaps`) so the monitor tailer can read it.
 
-> ⚠️ tcpviz cannot recover the true congestion window (cwnd) from captures; analyses rely on retransmission/out-of-order heuristics. Ensure reports document these limitations.
-
-### Cross-platform notes
-- `monitor` uses filesystem events via `watchdog` when available (automatic fallback to polling otherwise).
-- Validated on WSL Ubuntu + Windows (Npcap/Dumpcap share) and macOS (FSEvents). Ensure capture directories are accessible (e.g. `/mnt/c/pcaps` on WSL).
-
-## Reproduce the full workflow
-
-1. **Create/activate the Conda environment**
-   ```
-   conda env create -f environment.yml
-   conda activate CS204
-   ```
-
-2. **Prepare capture permissions on Linux/WSL**
-   ```
-   sudo apt install dumpcap tshark
-   sudo usermod -aG wireshark $USER
-   sudo setcap cap_net_raw,cap_net_admin+eip $(which dumpcap)
-   ```
-
-3. **Start a rolling capture**
-   ```
-   dumpcap -i eth0 -b filesize:50 -b files:10 -w /tmp/CS204/rolling.pcapng
-   ```
-
-4. **Maintain a stable symlink to the newest file**
-   ```
-   mkdir -p ~/tcpviz-links
-   python scripts/watch_latest_capture.py "/tmp/CS204/rolling_*.pcapng" ~/tcpviz-links/rolling-current.pcapng
-   ```
-
-5. **Run realtime monitoring**
-   ```
-   python -m src.cli monitor \
-     --pcap-path ~/tcpviz-links/rolling-current.pcapng \
-     --window 60 \
-     --threshold 10
-   ```
-
-6. **Generate dashboards**
-   ```
-   scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
-   ```
-   Review `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html`.
+> ⚠️ tcpviz cannot recover the true congestion window (cwnd); congestion proxies are heuristic. Document limitations in reports.
 
 ## Logging & benchmarking
-- Logging defaults to INFO; add `--verbose` to any CLI command to enable DEBUG output.
-- Each parse run records backend, packet counts, duration, and throughput in `benchmark.log` within the session directory.
+- Logging defaults to INFO (`--verbose` enables DEBUG). Watchdog/polling events log when files rotate or emit new events.
+- `parse-pcap` writes `benchmark.log` in each session directory summarising backend, duration, throughput, event counts.
 
 ## Packaging (single-file executable)
-```
+```bash
 conda activate CS204
 pip install pyinstaller
 pyinstaller --onefile -n tcpviz src/cli.py
 ```
 
 ## Development notes
-- Unit tests live under `tests/` and can be run via `make test` (inside the `CS204` conda environment).
-- `make mvp` executes a stubbed end-to-end run using `conda run`.
-- The project favours ASCII output and minimal external dependencies; Plotly is used for visualisations, falling back to simple placeholders when events are absent.
+- Tests live in `tests/`; run `conda activate CS204 && pytest -q` or `make test`.
+- `make mvp` executes a stub E2E run with `conda run`.
+- Helper scripts:
+  - `scripts/watch_latest_capture.py` – keep `rolling-current.pcapng` linked to the newest capture segment.
+  - `scripts/generate_dashboard.sh` – parse (optional) + plot + summary + combined report.
 
 ## Proposal alignment
 Relative to `Proposal.md` (“Real-Time TCPdump Log Analysis and Visualization”):
 
 **Delivered**
-- Dual-backend parsing (pyshark → dpkt) with canonical TCP fields, benchmarking, and session-scoped artifacts.
-- Retransmission/out-of-order/packet-loss detection plus per-flow sliding-window monitoring that emits WARN/CRITICAL alerts, driven by the realtime tailer.
-- Congestion proxies (per-flow cwnd bytes, RTT EMA) surfaced in summaries and event metadata.
-- Plotly-based timeline, flow summary, and combined report dashboard.
-- CLI workflow (`parse-pcap`, `plot`, `summary`, `monitor`) with logging, env-configurable thresholds, and consistent session directories.
+- Dual-backend parsing with benchmarking, skipped-packet stats, and artefact scoping.
+- Retransmission/out-of-order/packet-loss detection + per-flow sliding-window alerts (WARN/CRITICAL) backed by watchdog tailer.
+- Congestion proxies (cwnd bytes, RTT EMA) attached to events and CLI summaries.
+- Plotly timeline, flow summary, combined dashboard, plus automation scripts for reproducible reports.
+- CLI workflow (`parse-pcap`, `plot`, `summary`, `monitor`) with logging, env-configurable thresholds, consistent session directories.
 
 **Pending / future work**
-- Replace polling-based monitor with filesystem event listeners (watchdog) and document verified runs on macOS/Windows per proposal goals.
+- Replace heuristic loss inference with additional signals (RTO-style detection, zero-window probes, SYN/FIN anomaly tracking) per NEXT_ACTIONS.md.
+- Document verified runs on macOS/Windows beyond WSL (currently validated manually but not formally recorded).
