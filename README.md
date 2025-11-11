@@ -18,7 +18,7 @@ sudo usermod -aG wireshark $USER
 newgrp wireshark
 sudo setcap cap_net_raw,cap_net_admin+eip $(which dumpcap)
 ```
-(Windows 使用 Npcap/Dumpcap；macOS 需启用 FSEvents 监听权限。)
+(On Windows use Npcap/Dumpcap; on macOS ensure FSEvents access is enabled.)
 
 ### Conda environment
 ```bash
