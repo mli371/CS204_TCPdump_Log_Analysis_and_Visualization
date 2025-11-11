@@ -1,19 +1,55 @@
-# Repository Guidelines
+# Repository Handbook (for collaborators and agents)
 
-## Project Structure & Module Organization
-The `src/` directory houses the `tcpviz` package, with the CLI entry point in `src/cli.py` and supporting packages under `detectors/`, `parser/`, `realtime/`, and `viz/`. Tests live in `tests/`, using the same package layout to mirror production modules. Example inputs sit in `samples/`, while generated reports and logs belong in `artifacts/`; avoid committing those outputs. Configuration lives in `environment.yml` and reusable command shortcuts in the `Makefile`.
+## Project Layout
+- `src/` – production code (CLI in `src/cli.py`, subpackages for `parser`, `detectors`, `realtime`, `viz`, etc.).
+- `scripts/` – helper utilities (`watch_latest_capture.py`, `generate_dashboard.sh`).
+- `tests/` – pytest suites mirroring the `src/` tree.
+- `artifacts/` – generated sessions (timeline/summary/report); never commit.
+- `samples/` – placeholder inputs (safe pcaps or `.gitkeep`).
+- `environment.yml` – Conda definition; `Makefile` exposes common workflows.
 
-## Build, Test, and Development Commands
-Provision the Conda toolchain with `conda env create -f environment.yml` on first setup or `conda env update -f environment.yml --prune` to refresh dependencies, then `conda activate CS204`. Use `make test` to execute the pytest suite inside the managed environment. To exercise the CLI end-to-end, parse a capture with `python -m src.cli parse-pcap --in samples/test.pcapng` and render outputs with `python -m src.cli plot --in artifacts/session_*/events.jsonl`.
+## Getting Started
+```bash
+conda env create -f environment.yml   # or make init
+conda activate CS204
+```
+On WSL/macOS install capture tooling (`dumpcap`, `tshark`) and apply the necessary capabilities (`setcap cap_net_raw,cap_net_admin+eip $(which dumpcap)`). Windows users should install Npcap/Dumpcap.
 
-## Coding Style & Naming Conventions
-Follow Python 3.11 conventions with four-space indentation, type annotations, and docstrings for public functions. Use lower_snake_case for functions, methods, and module names; reserve UpperCamelCase for classes. Keep modules focused and factor reusable helpers into existing utilities or subpackages. Prefer ASCII output and logging patterns consistent with current Click commands and `logging_utils`.
+## Common Workflows
+- **Parse & visualise**:
+  ```bash
+  python -m src.cli parse-pcap --in samples/test.pcapng
+  python -m src.cli plot --in artifacts/session_*/events.jsonl
+  python -m src.cli summary --in artifacts/session_*/events.jsonl
+  scripts/generate_dashboard.sh /path/to/capture.pcapng
+  ```
+- **Realtime monitor**:
+  ```bash
+  python -m src.cli monitor --pcap-path ~/tcpviz-links/rolling-current.pcapng --window 60 --threshold 10
+  ```
+- **Helper scripts**:
+  - `scripts/watch_latest_capture.py "glob" ~/tcpviz-links/rolling-current.pcapng` keeps a symlink pointed at the newest rolling capture.
+  - `scripts/generate_dashboard.sh <pcap>` parses (optional), plots, summarises, and generates a combined HTML report.
+- **Makefile targets**:
+  `make parse PCAP=...`, `make monitor PCAP=...`, `make dashboard PCAP=...`, `make test` (pytest), `make init`.
 
-## Testing Guidelines
-Author unit tests alongside new functionality under `tests/`, using pytest’s `test_<feature>.py` naming scheme. Mock external packet captures where feasible; provide sample pcaps under `samples/` for integration scenarios. Aim to cover detectors, parsers, and CLI flows with assertions around emitted events and generated files. Run `make test` before submitting changes and note any session directories that the run generates.
+## Coding Standards
+- Python 3.11, four-space indentation, type hints, concise docstrings.
+- Module/function names in `snake_case`, classes in `UpperCamelCase`.
+- Keep logging consistent with `logging_utils` (INFO default, DEBUG via `--verbose`).
+- Avoid committing artifacts, caches, or pcaps; `.gitignore` already excludes these.
 
-## Commit & Pull Request Guidelines
-Write commit subjects in the imperative mood (e.g., “Add retransmission detector regression test”) and keep them under 72 characters; explain context and validation details in the body when needed. Commits should be scoped to a cohesive change touching code and tests together. Pull requests must include a concise summary, linked issues, and any CLI output or artifact previews that help reviewers verify behaviour. List the commands you ran so reviewers can reproduce validation quickly.
+## Testing
+- Create unit tests alongside features under `tests/` (pytest).
+- Mock or provide safe sample pcaps; do not expose sensitive traffic.
+- Run `conda activate CS204 && pytest -q` (or `make test`) before committing.
 
-## Security & Configuration Tips
-Ensure `tshark` and `dumpcap` are installed when working with live captures and document any additional system capabilities you require. Avoid committing captures containing sensitive traffic—redact or synthesize samples under `samples/` instead. When adding new environment variables, prefix them with `TCPVIZ_` and document usage in the README to keep configuration discoverable.
+## Commit & PR Expectations
+- Commit subjects: imperative mood, ≤72 chars (e.g., “Add RTT proxy to summary output”).
+- Include code + tests + docs updates in the same commit when practical.
+- PRs should describe the change, link issues, and mention commands run.
+
+## Security & Configuration Notes
+- When adding new env vars, prefix with `TCPVIZ_` and document usage in README.
+- Use the helper scripts to avoid storing raw captures in the repo; scrub or synthesize samples before sharing.
+- If you require additional OS capabilities, document them in README/NEXT_ACTIONS so others can reproduce the setup.
