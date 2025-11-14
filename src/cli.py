@@ -111,7 +111,7 @@ def parse_pcap_command(input_path: Path) -> None:
         click.echo(f"Backend: {summary['backend']}")
 
     click.echo("Event counts:")
-    for event_name in ("retransmission", "out_of_order"):
+    for event_name in ("retransmission", "out_of_order", "loss_infer"):
         click.echo(f"  {event_name}: {event_counts.get(event_name, 0)}")
 
     top_flows = summary.get("top_flows", [])
@@ -124,6 +124,16 @@ def parse_pcap_command(input_path: Path) -> None:
             click.echo(f"  {entry['flow_id']} -> {entry['event_count']} [{breakdown}]")
     else:
         click.echo("No flows with retransmission/out_of_order events detected.")
+
+    flow_metrics = summary.get("flow_metrics", [])
+    if flow_metrics:
+        click.echo("Sample flow congestion metrics:")
+        for entry in flow_metrics[:3]:
+            click.echo(
+                f"  {entry['flow_id']}: avg_rtt_ms={entry.get('avg_rtt_ms')} "
+                f"current_cwnd_bytes={entry.get('current_cwnd_bytes')} "
+                f"max_cwnd_bytes={entry.get('max_cwnd_bytes')}"
+            )
 
 
 @cli.command("plot")

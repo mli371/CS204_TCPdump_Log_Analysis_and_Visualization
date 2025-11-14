@@ -7,13 +7,14 @@ import logging
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 import ipaddress
+from collections import deque
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Callable, Dict, Iterator, List, MutableMapping, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Iterator, List, MutableMapping, Optional, Tuple
 
-from tcpviz.src.logging_utils import get_logger
-from tcpviz.src.detectors.out_of_order import advance_max_contig, detect_out_of_order
-from tcpviz.src.detectors.retrans import detect_retransmissions, record_range
+from src.logging_utils import get_logger
+from src.detectors.out_of_order import advance_max_contig, detect_out_of_order
+from src.detectors.retrans import detect_retransmissions, record_range
 
 try:  # pyshark preferred
     import pyshark  # type: ignore
@@ -28,6 +29,7 @@ except ImportError:  # pragma: no cover - optional dependency
 
 _BACKEND_WARNINGS_EMITTED: set[str] = set()
 LOGGER = get_logger(__name__)
+DUP_ACK_THRESHOLD = 3
 
 
 def _log_backend(message: str, level: int = logging.INFO) -> None:
@@ -63,6 +65,14 @@ class FlowState:
 
     max_contig_seq_sent: Optional[int] = None
     seen_ranges: List[Tuple[int, int]] = field(default_factory=list)
+    last_ack: Optional[int] = None
+    dup_ack_count: int = 0
+    last_loss_ack: Optional[int] = None
+    outstanding_segments: Deque[Tuple[int, int, float]] = field(default_factory=deque)
+    cwnd_bytes: int = 0
+    max_cwnd_bytes: int = 0
+    rtt_ema_ms: Optional[float] = None
+    rtt_sample_count: int = 0
 
 
 @dataclass
@@ -165,7 +175,7 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     flow_states: Dict[str, FlowState] = defaultdict(FlowState)
     flow_event_breakdown: Dict[str, MutableMapping[str, int]] = defaultdict(lambda: defaultdict(int))
-    event_counts: Dict[str, int] = {name: 0 for name in ("retransmission", "out_of_order")}
+    event_counts: Dict[str, int] = {name: 0 for name in ("retransmission", "out_of_order", "loss_infer")}
 
     total_packets = 0
     skipped_packets = 0
@@ -190,7 +200,14 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
             start = seq if seq is not None else None
             end = seq + length if seq is not None else None
 
+            loss_event = _maybe_infer_loss(state, packet, flow_id)
+            if loss_event:
+                events.append(loss_event)
+                event_counts["loss_infer"] = event_counts.get("loss_infer", 0) + 1
+                flow_event_breakdown[flow_id]["loss_infer"] += 1
+
             if seq is not None and length > 0 and end is not None:
+                _record_outstanding_segment(state, seq, end, packet.ts)
                 if detect_retransmissions(state.seen_ranges, start, end):
                     triggered.append("retransmission")
                 if detect_out_of_order(seq, length, state.max_contig_seq_sent):
@@ -212,6 +229,7 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
                     extra["reason"] = "segment_overlap"
                 if event_name == "out_of_order":
                     extra["max_contig_seq_sent_before"] = previous_max
+                _attach_congestion_snapshot(extra, state)
 
                 event_obj = Event(
                     ts=packet.ts,
@@ -254,6 +272,7 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
             for flow_id, count, event_breakdown in top_flows
         ],
         "skipped_packets": skipped_packets,
+        "flow_metrics": _build_flow_metrics(flow_states),
     }
 
     return summary
@@ -291,13 +310,110 @@ def _empty_summary() -> Dict[str, Any]:
         "events": [],
         "total_packets": 0,
         "tcp_packets": 0,
-        "event_counts": {name: 0 for name in ("retransmission", "out_of_order")},
+        "event_counts": {name: 0 for name in ("retransmission", "out_of_order", "loss_infer")},
         "top_flows": [],
+        "flow_metrics": [],
     }
 
 
 def _build_flow_id(src: str, sport: int, dst: str, dport: int) -> str:
     return f"{src}:{sport}->{dst}:{dport}"
+
+
+def _maybe_infer_loss(state: FlowState, packet: PacketInfo, flow_id: str) -> Optional[Dict[str, Any]]:
+    ack = packet.ack
+    if ack is None:
+        return None
+
+    ack_value = int(ack)
+
+    if state.last_ack is None or ack_value > state.last_ack:
+        _handle_ack_progress(state, ack_value, packet.ts)
+        state.last_ack = ack_value
+        state.dup_ack_count = 1
+        state.last_loss_ack = None
+        return None
+
+    if ack_value == state.last_ack:
+        state.dup_ack_count += 1
+    else:
+        state.last_ack = ack_value
+        state.dup_ack_count = 1
+        return None
+
+    if state.dup_ack_count >= max(DUP_ACK_THRESHOLD, 1) and state.last_loss_ack != ack_value:
+        state.last_loss_ack = ack_value
+        event = {
+            "ts": packet.ts,
+            "event": "loss_infer",
+            "flow_id": flow_id,
+            "src": packet.src,
+            "dst": packet.dst,
+            "sport": packet.sport,
+            "dport": packet.dport,
+            "seq": packet.seq,
+            "ack": packet.ack,
+            "len": packet.payload_len if packet.payload_len >= 0 else None,
+            "flags": packet.flags,
+            "extra": {
+                "reason": "triple_duplicate_ack",
+                "dup_acks": state.dup_ack_count,
+            },
+        }
+        _attach_congestion_snapshot(event["extra"], state)
+        return event
+
+    return None
+
+
+def _record_outstanding_segment(state: FlowState, seq_start: int, seq_end: int, ts: float) -> None:
+    length = max(seq_end - seq_start, 0)
+    if length <= 0:
+        return
+    state.outstanding_segments.append((seq_start, seq_end, ts))
+    state.cwnd_bytes += length
+    state.max_cwnd_bytes = max(state.max_cwnd_bytes, state.cwnd_bytes)
+
+
+def _handle_ack_progress(state: FlowState, ack_value: int, ts: float) -> None:
+    while state.outstanding_segments and ack_value >= state.outstanding_segments[0][1]:
+        start, end, sent_ts = state.outstanding_segments.popleft()
+        seg_len = max(end - start, 0)
+        state.cwnd_bytes = max(state.cwnd_bytes - seg_len, 0)
+        sample_ms = max((ts - sent_ts) * 1000.0, 0.0)
+        _update_rtt(state, sample_ms)
+
+
+def _update_rtt(state: FlowState, sample_ms: float, alpha: float = 0.25) -> None:
+    if sample_ms <= 0:
+        return
+    if state.rtt_ema_ms is None:
+        state.rtt_ema_ms = sample_ms
+    else:
+        state.rtt_ema_ms = (1 - alpha) * state.rtt_ema_ms + alpha * sample_ms
+    state.rtt_sample_count += 1
+
+
+def _attach_congestion_snapshot(extra: Dict[str, Any], state: FlowState) -> None:
+    extra["cwnd_bytes"] = state.cwnd_bytes
+    extra["max_cwnd_bytes"] = state.max_cwnd_bytes
+    extra["rtt_ema_ms"] = state.rtt_ema_ms
+
+
+def _build_flow_metrics(flow_states: Dict[str, FlowState]) -> List[Dict[str, Any]]:
+    metrics: List[Dict[str, Any]] = []
+    for flow_id, state in flow_states.items():
+        metrics.append(
+            {
+                "flow_id": flow_id,
+                "avg_rtt_ms": state.rtt_ema_ms,
+                "rtt_samples": state.rtt_sample_count,
+                "current_cwnd_bytes": state.cwnd_bytes,
+                "max_cwnd_bytes": state.max_cwnd_bytes,
+            }
+        )
+    metrics.sort(key=lambda item: item["max_cwnd_bytes"] or 0, reverse=True)
+    return metrics
 
 
 def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
@@ -489,4 +605,4 @@ def _format_ip(raw: bytes) -> Optional[str]:
         return None
 
 
-__all__ = ["Event", "parse_pcap"]
+__all__ = ["Event", "FlowState", "PacketInfo", "parse_pcap", "_maybe_infer_loss"]

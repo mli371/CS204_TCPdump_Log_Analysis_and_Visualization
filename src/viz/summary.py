@@ -9,12 +9,12 @@ from typing import Dict, Iterable, List, Mapping
 
 import plotly.express as px
 
-from tcpviz.src.logging_utils import get_logger
+from src.logging_utils import get_logger
 
 Event = Mapping[str, object]
 LOGGER = get_logger(__name__)
 
-EVENTS_OF_INTEREST = {"retransmission", "out_of_order"}
+EVENTS_OF_INTEREST = {"retransmission", "out_of_order", "loss_infer"}
 
 
 def summarize(events: Iterable[Event]) -> Counter:

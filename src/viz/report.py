@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
-from tcpviz.src.logging_utils import get_logger
-from tcpviz.src.viz.summary import render_summary
-from tcpviz.src.viz.timeline import render as render_timeline
+from src.logging_utils import get_logger
+from src.viz.summary import render_summary
+from src.viz.timeline import render as render_timeline
 
 LOGGER = get_logger(__name__)
 
