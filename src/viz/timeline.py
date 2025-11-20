@@ -43,7 +43,7 @@ def _to_plot_rows(events: Iterable[dict]) -> List[dict]:
                 "ack": event.get("ack"),
                 "len": event.get("len"),
                 "flags": event.get("flags"),
-                "extra": event.get("extra", {}),
+                "extra_json": json.dumps(event.get("extra", {}), sort_keys=True),
             }
         )
     return rows
@@ -82,10 +82,11 @@ def render(events_path: str | Path, output_dir: str | Path | None = None) -> Pat
             "timestamp": True,
             "flow_id": True,
             "event": True,
-            "seq": True,
-            "ack": True,
-            "len": True,
-            "flags": True,
+        "seq": True,
+        "ack": True,
+        "len": True,
+        "flags": True,
+        "extra_json": True,
         },
         category_orders={"event": sorted({row["event"] for row in rows})},
         labels={"timestamp": "Timestamp (s)", "flow_id": "Flow"},

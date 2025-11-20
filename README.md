@@ -5,6 +5,7 @@
 ## Feature highlights
 - **Dual-backend parsing** (pyshark → dpkt fallback) with per-run benchmarking, backend selection, and skipped-packet tracking.
 - **Detectors & congestion proxies**: retransmission/out-of-order/loss inference plus cwnd/RTT estimators exposed in event metadata and summaries.
+- **Loss inference heuristics**: triple-duplicate-ACK detection, ACK-stall timeouts with adaptive thresholds, and retransmission-without-dup-ACK detection, all with cwnd/RTT snapshots for context.
 - **Realtime monitoring**: sliding-window WARN/CRITICAL alerts, watchdog-based tailer, configurable thresholds and poll intervals.
 - **Visual workflow**: Plotly timeline, per-flow summary, combined dashboard (timeline + summary) generated via helper script.
 - **CLI-first tooling**: `parse-pcap`, `plot`, `summary`, `monitor`, and automation scripts (`watch_latest_capture.py`, `generate_dashboard.sh`).
@@ -82,6 +83,13 @@ Environment variables `TCPVIZ_WINDOW`, `TCPVIZ_THRESHOLD`, `TCPVIZ_POLL_INTERVAL
    ```
    Open `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html` in a browser.
 
+### Loss inference heuristics
+- **Triple duplicate ACKs**: emits `loss_infer` with `extra.reason=triple_duplicate_ack` once per ACK value.
+- **ACK stall timeout**: flags loss when ACK progress freezes while data is outstanding. The timeout uses the max of a floor (default 400ms) and an RTT-aware multiplier (default 4× smoothed RTT). See `ACK_STALL_THRESHOLD_MS` and `ACK_STALL_RTT_MULTIPLIER` in `src/parser/pcap_reader.py`.
+- **Retransmission without dup ACKs**: if a retransmission appears before dup-ACK thresholds are hit, a `loss_infer` is emitted with `extra.reason=retransmission_without_dup_acks`.
+- Timeline hover shows `extra_json` (reason, stall_ms/threshold_ms, cwnd/RTT snapshots). Summary charts aggregate by event type (not reason).
+- **Tuning**: adjust the two constants above or add CLI/env wiring if you need more aggressive timeouts on low-latency links; re-run `parse-pcap` after changes.
+
 ### Windows capture handoff
 ```powershell
 tshark -D
@@ -120,5 +128,5 @@ Relative to `Proposal.md` (“Real-Time TCPdump Log Analysis and Visualization�
 - CLI workflow (`parse-pcap`, `plot`, `summary`, `monitor`) with logging, env-configurable thresholds, consistent session directories.
 
 **Pending / future work**
-- Replace heuristic loss inference with additional signals (RTO-style detection, zero-window probes, SYN/FIN anomaly tracking) per NEXT_ACTIONS.md.
+- Extend loss inference beyond ACK-stall and dup-ACK signals: zero-window probes, SYN/FIN anomaly tracking, and richer timeout tuning per NEXT_ACTIONS.md.
 - Document verified runs on macOS/Windows beyond WSL (currently validated manually but not formally recorded).
