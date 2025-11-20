@@ -26,6 +26,8 @@ DEFAULT_POLL_INTERVAL = 2.0
 ENV_WINDOW = "TCPVIZ_WINDOW"
 ENV_THRESHOLD = "TCPVIZ_THRESHOLD"
 ENV_POLL_INTERVAL = "TCPVIZ_POLL_INTERVAL"
+ENV_LOSS_THRESHOLD = "TCPVIZ_LOSS_THRESHOLD"
+ENV_OOO_THRESHOLD = "TCPVIZ_OOO_THRESHOLD"
 
 from tcpviz.src.logging_utils import configure_logging, get_logger
 from tcpviz.src.parser import parse_pcap
@@ -111,7 +113,14 @@ def parse_pcap_command(input_path: Path) -> None:
         click.echo(f"Backend: {summary['backend']}")
 
     click.echo("Event counts:")
-    for event_name in ("retransmission", "out_of_order", "loss_infer"):
+    for event_name in (
+        "retransmission",
+        "out_of_order",
+        "loss_infer",
+        "handshake_anomaly",
+        "teardown_anomaly",
+        "zero_window",
+    ):
         click.echo(f"  {event_name}: {event_counts.get(event_name, 0)}")
 
     top_flows = summary.get("top_flows", [])
@@ -175,29 +184,65 @@ def summary_command(events_path: Path) -> None:
     help=f"Retransmission threshold per flow (default {DEFAULT_THRESHOLD}; env {ENV_THRESHOLD})",
 )
 @click.option(
+    "--loss-threshold",
+    default=None,
+    type=int,
+    show_default=False,
+    help=f"Loss inference threshold per flow (default {DEFAULT_THRESHOLD}; env {ENV_LOSS_THRESHOLD})",
+)
+@click.option(
+    "--ooo-threshold",
+    default=None,
+    type=int,
+    show_default=False,
+    help=f"Out-of-order threshold per flow (default {DEFAULT_THRESHOLD}; env {ENV_OOO_THRESHOLD})",
+)
+@click.option(
     "--poll-interval",
     default=None,
     type=float,
     show_default=False,
     help=f"Polling interval for tailing the capture (default {DEFAULT_POLL_INTERVAL}; env {ENV_POLL_INTERVAL})",
 )
-def monitor_command(pcap_path: Path, window: int | None, threshold: int | None, poll_interval: float | None) -> None:
+def monitor_command(
+    pcap_path: Path,
+    window: int | None,
+    threshold: int | None,
+    loss_threshold: int | None,
+    ooo_threshold: int | None,
+    poll_interval: float | None,
+) -> None:
     """Continuously monitor a rolling capture and alert on retransmissions."""
 
     window_seconds = _resolve_config(window, ENV_WINDOW, DEFAULT_WINDOW, int)
     threshold_value = _resolve_config(threshold, ENV_THRESHOLD, DEFAULT_THRESHOLD, int)
+    loss_threshold_value = _resolve_config(loss_threshold, ENV_LOSS_THRESHOLD, threshold_value, int)
+    ooo_threshold_value = _resolve_config(ooo_threshold, ENV_OOO_THRESHOLD, threshold_value, int)
     poll_value = _resolve_config(poll_interval, ENV_POLL_INTERVAL, DEFAULT_POLL_INTERVAL, float)
 
-    monitor = SlidingWindowMonitor(window_seconds=window_seconds, threshold=threshold_value)
+    thresholds = {
+        "retransmission": threshold_value,
+        "loss_infer": loss_threshold_value,
+        "out_of_order": ooo_threshold_value,
+        "handshake_anomaly": threshold_value,
+        "teardown_anomaly": threshold_value,
+        "zero_window": threshold_value,
+    }
+
+    monitor = SlidingWindowMonitor(
+        window_seconds=window_seconds,
+        threshold=threshold_value,
+        thresholds=thresholds,
+    )
     click.echo(
         "Press Ctrl+C to stop. Monitoring retransmissions with "
-        f"window={window_seconds}s threshold={threshold_value} poll_interval={poll_value}s."
+        f"window={window_seconds}s thresholds={thresholds} poll_interval={poll_value}s."
     )
     LOGGER.info(
-        "Monitoring %s with window=%ss threshold=%s poll_interval=%ss",
+        "Monitoring %s with window=%ss thresholds=%s poll_interval=%ss",
         pcap_path,
         window_seconds,
-        threshold_value,
+        thresholds,
         poll_value,
     )
 

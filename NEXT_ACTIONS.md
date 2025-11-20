@@ -10,6 +10,6 @@
 ✅ Implemented watchdog-backed monitor with README cross-platform notes (see `src/realtime/file_tail.py`, README).
 
 ## Extended Congestion/Anomaly Heuristics
-1. **RTO-style loss detection**: tune adaptive stall thresholds (RTT-aware), add configurability, and evaluate false-positive rates on mixed workloads.
-2. **Handshake / teardown checks**: detect missing SYN+ACK, repeated SYNs, zero-window probes, or FIN/RST storms to expand alert coverage.
-3. **Severity policy**: make WARN/CRITICAL thresholds configurable per-event-type (loss, retrans, out-of-order) and emit structured JSON for alerting pipelines.
+1. **RTO-style loss detection**: tune thresholds (ACK-stall floor/RTT multiplier) and validate on varied pcaps to reduce false positives.
+2. **Handshake / teardown checks**: add time-based missing SYN+ACK heuristics and validate the existing retry/storm/zero-window detectors on diverse captures.
+3. **Severity policy**: add alert stream tests and refine per-event defaults based on operator feedback.

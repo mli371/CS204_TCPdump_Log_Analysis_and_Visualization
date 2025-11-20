@@ -76,6 +76,15 @@ class FlowState:
     max_cwnd_bytes: int = 0
     rtt_ema_ms: Optional[float] = None
     rtt_sample_count: int = 0
+    syn_seen: bool = False
+    syn_ack_seen: bool = False
+    syn_retry_count: int = 0
+    syn_anomaly_reported: bool = False
+    fin_count: int = 0
+    fin_anomaly_reported: bool = False
+    rst_count: int = 0
+    rst_anomaly_reported: bool = False
+    zero_window_count: int = 0
 
 
 @dataclass
@@ -91,6 +100,7 @@ class PacketInfo:
     ack: Optional[int]
     payload_len: int
     flags: Optional[str]
+    window_size: Optional[int] = None
 
 
 def parse_pcap(pcap_path: str | Path, benchmark_dir: Path | None = None) -> Dict[str, Any]:
@@ -178,7 +188,17 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     flow_states: Dict[str, FlowState] = defaultdict(FlowState)
     flow_event_breakdown: Dict[str, MutableMapping[str, int]] = defaultdict(lambda: defaultdict(int))
-    event_counts: Dict[str, int] = {name: 0 for name in ("retransmission", "out_of_order", "loss_infer")}
+    event_counts: Dict[str, int] = {
+        name: 0
+        for name in (
+            "retransmission",
+            "out_of_order",
+            "loss_infer",
+            "handshake_anomaly",
+            "teardown_anomaly",
+            "zero_window",
+        )
+    }
 
     total_packets = 0
     skipped_packets = 0
@@ -202,6 +222,14 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
 
             start = seq if seq is not None else None
             end = seq + length if seq is not None else None
+
+            anomaly_events = _maybe_emit_control_plane_anomalies(state, packet, flow_id)
+            for anomaly in anomaly_events:
+                events.append(anomaly)
+                name = anomaly.get("event")
+                if name:
+                    event_counts[name] = event_counts.get(name, 0) + 1
+                    flow_event_breakdown[flow_id][name] += 1
 
             loss_event = _maybe_infer_loss(state, packet, flow_id)
             if loss_event:
@@ -439,6 +467,100 @@ def _maybe_infer_retrans_timeout(
     return event
 
 
+def _maybe_emit_control_plane_anomalies(
+    state: FlowState, packet: PacketInfo, flow_id: str
+) -> List[Dict[str, Any]]:
+    flags = packet.flags or ""
+    emitted: List[Dict[str, Any]] = []
+
+    if "S" in flags and "A" not in flags:
+        if not state.syn_seen:
+            state.syn_seen = True
+            state.syn_retry_count = 1
+        else:
+            state.syn_retry_count += 1
+            if not state.syn_ack_seen and not state.syn_anomaly_reported and state.syn_retry_count >= 3:
+                event = _build_event(
+                    "handshake_anomaly",
+                    packet,
+                    flow_id,
+                    reason="syn_retry_without_synack",
+                    retries=state.syn_retry_count,
+                )
+                _attach_congestion_snapshot(event["extra"], state)
+                emitted.append(event)
+                state.syn_anomaly_reported = True
+    if "S" in flags and "A" in flags:
+        state.syn_ack_seen = True
+
+    if "R" in flags:
+        state.rst_count += 1
+        if not state.rst_anomaly_reported and state.rst_count >= 2:
+            event = _build_event(
+                "teardown_anomaly",
+                packet,
+                flow_id,
+                reason="rst_storm",
+                rst_count=state.rst_count,
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.rst_anomaly_reported = True
+
+    if "F" in flags:
+        state.fin_count += 1
+        if not state.fin_anomaly_reported and state.fin_count >= 4:
+            event = _build_event(
+                "teardown_anomaly",
+                packet,
+                flow_id,
+                reason="fin_storm",
+                fin_count=state.fin_count,
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.fin_anomaly_reported = True
+
+    if packet.window_size == 0:
+        state.zero_window_count += 1
+        event = _build_event(
+            "zero_window",
+            packet,
+            flow_id,
+            reason="zero_window_advertisement",
+            zero_window_count=state.zero_window_count,
+        )
+        _attach_congestion_snapshot(event["extra"], state)
+        emitted.append(event)
+
+    return emitted
+
+
+def _build_event(
+    name: str,
+    packet: PacketInfo,
+    flow_id: str,
+    **extra_fields: Any,
+) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {"reason": extra_fields.pop("reason", None)}
+    extra.update({k: v for k, v in extra_fields.items() if v is not None})
+    event = {
+        "ts": packet.ts,
+        "event": name,
+        "flow_id": flow_id,
+        "src": packet.src,
+        "dst": packet.dst,
+        "sport": packet.sport,
+        "dport": packet.dport,
+        "seq": packet.seq,
+        "ack": packet.ack,
+        "len": packet.payload_len if packet.payload_len >= 0 else None,
+        "flags": packet.flags,
+        "extra": extra,
+    }
+    return event
+
+
 def _maybe_emit_ack_stall(
     state: FlowState, packet: PacketInfo, flow_id: str, ack_value: int
 ) -> Optional[Dict[str, Any]]:
@@ -550,6 +672,7 @@ def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
                 ack = _int_field(getattr(tcp, "ack", None))
                 payload_len = _int_field(getattr(tcp, "len", None)) or 0
                 flags = _pyshark_flag_string(tcp)
+                window_size = _int_field(getattr(tcp, "window_size_value", None))
 
                 if None in (src, dst, sport, dport):
                     continue
@@ -564,6 +687,7 @@ def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
                     ack=ack,
                     payload_len=payload_len,
                     flags=flags,
+                    window_size=window_size,
                 )
             except (AttributeError, ValueError, TypeError):
                 continue
@@ -603,6 +727,7 @@ def _iter_dpkt_packets(path: Path) -> Iterator[PacketInfo]:
                     ack=ack,
                     payload_len=payload_len,
                     flags=flags,
+                    window_size=getattr(tcp, "win", None),
                 )
             except (ValueError, AttributeError, dpkt.UnpackError):
                 continue
