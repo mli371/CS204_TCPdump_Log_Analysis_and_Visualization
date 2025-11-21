@@ -4,7 +4,7 @@ __pycache__/
 .pytest_cache/
 artifacts/
 tcpviz-links/
-scripts/*.pyc
+*.pyc
 scripts/*.log
 *.pcapng
 pip-wheel-metadata/

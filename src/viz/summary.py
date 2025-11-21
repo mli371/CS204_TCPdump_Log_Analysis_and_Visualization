@@ -14,7 +14,14 @@ from src.logging_utils import get_logger
 Event = Mapping[str, object]
 LOGGER = get_logger(__name__)
 
-EVENTS_OF_INTEREST = {"retransmission", "out_of_order", "loss_infer"}
+EVENTS_OF_INTEREST = {
+    "retransmission",
+    "out_of_order",
+    "loss_infer",
+    "handshake_anomaly",
+    "teardown_anomaly",
+    "zero_window",
+}
 
 
 def summarize(events: Iterable[Event]) -> Counter:
@@ -38,7 +45,17 @@ def render_summary(events_path: str | Path, output_dir: str | Path | None = None
         event_name = event.get("event")
         if not flow_id or event_name not in EVENTS_OF_INTEREST:
             continue
-        flow_counts = counts.setdefault(str(flow_id), {"retransmission": 0, "out_of_order": 0})
+        flow_counts = counts.setdefault(
+            str(flow_id),
+            {
+                "retransmission": 0,
+                "out_of_order": 0,
+                "loss_infer": 0,
+                "handshake_anomaly": 0,
+                "teardown_anomaly": 0,
+                "zero_window": 0,
+            },
+        )
         flow_counts[str(event_name)] = flow_counts.get(str(event_name), 0) + 1
 
     rows: List[Dict[str, object]] = []

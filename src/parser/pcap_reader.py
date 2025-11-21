@@ -30,6 +30,9 @@ except ImportError:  # pragma: no cover - optional dependency
 _BACKEND_WARNINGS_EMITTED: set[str] = set()
 LOGGER = get_logger(__name__)
 DUP_ACK_THRESHOLD = 3
+ACK_STALL_THRESHOLD_MS = 200.0
+ACK_STALL_RTT_MULTIPLIER = 3.0
+SYN_TIMEOUT_SECONDS = 3.0
 
 
 def _log_backend(message: str, level: int = logging.INFO) -> None:
@@ -51,6 +54,7 @@ class Event:
     ack: Optional[int]
     length: Optional[int]
     flags: Optional[str]
+    severity: str = "INFO"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -66,6 +70,7 @@ class FlowState:
     max_contig_seq_sent: Optional[int] = None
     seen_ranges: List[Tuple[int, int]] = field(default_factory=list)
     last_ack: Optional[int] = None
+    last_ack_progress_ts: Optional[float] = None
     dup_ack_count: int = 0
     last_loss_ack: Optional[int] = None
     outstanding_segments: Deque[Tuple[int, int, float]] = field(default_factory=deque)
@@ -73,6 +78,16 @@ class FlowState:
     max_cwnd_bytes: int = 0
     rtt_ema_ms: Optional[float] = None
     rtt_sample_count: int = 0
+    syn_seen: bool = False
+    syn_ts: Optional[float] = None
+    syn_ack_seen: bool = False
+    syn_retry_count: int = 0
+    syn_anomaly_reported: bool = False
+    fin_count: int = 0
+    fin_anomaly_reported: bool = False
+    rst_count: int = 0
+    rst_anomaly_reported: bool = False
+    zero_window_count: int = 0
 
 
 @dataclass
@@ -88,6 +103,7 @@ class PacketInfo:
     ack: Optional[int]
     payload_len: int
     flags: Optional[str]
+    window_size: Optional[int] = None
 
 
 def parse_pcap(pcap_path: str | Path, benchmark_dir: Path | None = None) -> Dict[str, Any]:
@@ -175,7 +191,17 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
     events: List[Dict[str, Any]] = []
     flow_states: Dict[str, FlowState] = defaultdict(FlowState)
     flow_event_breakdown: Dict[str, MutableMapping[str, int]] = defaultdict(lambda: defaultdict(int))
-    event_counts: Dict[str, int] = {name: 0 for name in ("retransmission", "out_of_order", "loss_infer")}
+    event_counts: Dict[str, int] = {
+        name: 0
+        for name in (
+            "retransmission",
+            "out_of_order",
+            "loss_infer",
+            "handshake_anomaly",
+            "teardown_anomaly",
+            "zero_window",
+        )
+    }
 
     total_packets = 0
     skipped_packets = 0
@@ -200,6 +226,14 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
             start = seq if seq is not None else None
             end = seq + length if seq is not None else None
 
+            anomaly_events = _maybe_emit_control_plane_anomalies(state, packet, flow_id)
+            for anomaly in anomaly_events:
+                events.append(anomaly)
+                name = anomaly.get("event")
+                if name:
+                    event_counts[name] = event_counts.get(name, 0) + 1
+                    flow_event_breakdown[flow_id][name] += 1
+
             loss_event = _maybe_infer_loss(state, packet, flow_id)
             if loss_event:
                 events.append(loss_event)
@@ -219,6 +253,13 @@ def _consume_packets(packet_iter: Iterator[PacketInfo]) -> Dict[str, Any]:
 
             if not triggered:
                 continue
+
+            if "retransmission" in triggered:
+                timeout_loss = _maybe_infer_retrans_timeout(state, packet, flow_id)
+                if timeout_loss:
+                    events.append(timeout_loss)
+                    event_counts["loss_infer"] = event_counts.get("loss_infer", 0) + 1
+                    flow_event_breakdown[flow_id]["loss_infer"] += 1
 
             for event_name in dict.fromkeys(triggered):
                 event_counts[event_name] = event_counts.get(event_name, 0) + 1
@@ -330,6 +371,7 @@ def _maybe_infer_loss(state: FlowState, packet: PacketInfo, flow_id: str) -> Opt
     if state.last_ack is None or ack_value > state.last_ack:
         _handle_ack_progress(state, ack_value, packet.ts)
         state.last_ack = ack_value
+        state.last_ack_progress_ts = packet.ts
         state.dup_ack_count = 1
         state.last_loss_ack = None
         return None
@@ -340,6 +382,10 @@ def _maybe_infer_loss(state: FlowState, packet: PacketInfo, flow_id: str) -> Opt
         state.last_ack = ack_value
         state.dup_ack_count = 1
         return None
+
+    stall_event = _maybe_emit_ack_stall(state, packet, flow_id, ack_value)
+    if stall_event:
+        return stall_event
 
     if state.dup_ack_count >= max(DUP_ACK_THRESHOLD, 1) and state.last_loss_ack != ack_value:
         state.last_loss_ack = ack_value
@@ -359,6 +405,7 @@ def _maybe_infer_loss(state: FlowState, packet: PacketInfo, flow_id: str) -> Opt
                 "reason": "triple_duplicate_ack",
                 "dup_acks": state.dup_ack_count,
             },
+            "severity": "WARNING",
         }
         _attach_congestion_snapshot(event["extra"], state)
         return event
@@ -382,6 +429,203 @@ def _handle_ack_progress(state: FlowState, ack_value: int, ts: float) -> None:
         state.cwnd_bytes = max(state.cwnd_bytes - seg_len, 0)
         sample_ms = max((ts - sent_ts) * 1000.0, 0.0)
         _update_rtt(state, sample_ms)
+
+
+def _maybe_infer_retrans_timeout(
+    state: FlowState, packet: PacketInfo, flow_id: str
+) -> Optional[Dict[str, Any]]:
+    ack_value = state.last_ack
+    if ack_value is None:
+        return None
+    if state.dup_ack_count >= max(DUP_ACK_THRESHOLD, 1):
+        return None
+    if state.last_loss_ack == ack_value:
+        return None
+
+    stall_ms = None
+    threshold_ms = _stall_threshold_ms(state)
+    if state.last_ack_progress_ts is not None:
+        stall_ms = max((packet.ts - state.last_ack_progress_ts) * 1000.0, 0.0)
+
+    state.last_loss_ack = ack_value
+    event = {
+        "ts": packet.ts,
+        "event": "loss_infer",
+        "flow_id": flow_id,
+        "src": packet.src,
+        "dst": packet.dst,
+        "sport": packet.sport,
+        "dport": packet.dport,
+        "seq": packet.seq,
+        "ack": packet.ack,
+        "len": packet.payload_len if packet.payload_len >= 0 else None,
+        "flags": packet.flags,
+        "extra": {
+            "reason": "retransmission_without_dup_acks",
+            "dup_acks": state.dup_ack_count,
+            "stall_ms": stall_ms,
+            "threshold_ms": threshold_ms,
+        },
+        "severity": "WARNING",
+    }
+    _attach_congestion_snapshot(event["extra"], state)
+    return event
+
+
+def _maybe_emit_control_plane_anomalies(
+    state: FlowState, packet: PacketInfo, flow_id: str
+) -> List[Dict[str, Any]]:
+    flags = packet.flags or ""
+    emitted: List[Dict[str, Any]] = []
+
+    if "S" in flags and "A" not in flags:
+        if not state.syn_seen:
+            state.syn_seen = True
+            state.syn_ts = packet.ts
+            state.syn_retry_count = 1
+        else:
+            state.syn_retry_count += 1
+            if not state.syn_ack_seen and not state.syn_anomaly_reported and state.syn_retry_count >= 3:
+                event = _build_event(
+                    "handshake_anomaly",
+                    packet,
+                    flow_id,
+                    reason="syn_retry_without_synack",
+                    retries=state.syn_retry_count,
+                    severity="CRITICAL",
+                )
+                _attach_congestion_snapshot(event["extra"], state)
+                emitted.append(event)
+                state.syn_anomaly_reported = True
+    if "S" in flags and "A" in flags:
+        state.syn_ack_seen = True
+
+    if state.syn_seen and not state.syn_ack_seen and not state.syn_anomaly_reported:
+        if state.syn_ts is not None and (packet.ts - state.syn_ts) > SYN_TIMEOUT_SECONDS:
+            event = _build_event(
+                "handshake_anomaly",
+                packet,
+                flow_id,
+                reason="syn_timeout",
+                timeout_threshold=SYN_TIMEOUT_SECONDS,
+                severity="CRITICAL",
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.syn_anomaly_reported = True
+
+    if "R" in flags:
+        state.rst_count += 1
+        if not state.rst_anomaly_reported and state.rst_count >= 2:
+            event = _build_event(
+                "teardown_anomaly",
+                packet,
+                flow_id,
+                reason="rst_storm",
+                rst_count=state.rst_count,
+                severity="WARNING",
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.rst_anomaly_reported = True
+
+    if "F" in flags:
+        state.fin_count += 1
+        if not state.fin_anomaly_reported and state.fin_count >= 4:
+            event = _build_event(
+                "teardown_anomaly",
+                packet,
+                flow_id,
+                reason="fin_storm",
+                fin_count=state.fin_count,
+                severity="WARNING",
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.fin_anomaly_reported = True
+
+    if packet.window_size == 0:
+        state.zero_window_count += 1
+        event = _build_event(
+            "zero_window",
+            packet,
+            flow_id,
+            reason="zero_window_advertisement",
+            zero_window_count=state.zero_window_count,
+            severity="WARNING",
+        )
+        _attach_congestion_snapshot(event["extra"], state)
+        emitted.append(event)
+
+    return emitted
+
+
+def _build_event(
+    name: str,
+    packet: PacketInfo,
+    flow_id: str,
+    severity: str = "INFO",
+    **extra_fields: Any,
+) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {"reason": extra_fields.pop("reason", None)}
+    extra.update({k: v for k, v in extra_fields.items() if v is not None})
+    event = {
+        "ts": packet.ts,
+        "event": name,
+        "flow_id": flow_id,
+        "src": packet.src,
+        "dst": packet.dst,
+        "sport": packet.sport,
+        "dport": packet.dport,
+        "seq": packet.seq,
+        "ack": packet.ack,
+        "len": packet.payload_len if packet.payload_len >= 0 else None,
+        "flags": packet.flags,
+        "severity": severity,
+        "extra": extra,
+    }
+    return event
+
+
+def _maybe_emit_ack_stall(
+    state: FlowState, packet: PacketInfo, flow_id: str, ack_value: int
+) -> Optional[Dict[str, Any]]:
+    if not state.outstanding_segments:
+        return None
+    if state.last_ack_progress_ts is None:
+        return None
+
+    stall_ms = max((packet.ts - state.last_ack_progress_ts) * 1000.0, 0.0)
+    threshold_ms = _stall_threshold_ms(state)
+    if stall_ms < threshold_ms:
+        return None
+    if state.last_loss_ack == ack_value:
+        return None
+
+    state.last_loss_ack = ack_value
+    event = {
+        "ts": packet.ts,
+        "event": "loss_infer",
+        "flow_id": flow_id,
+        "src": packet.src,
+        "dst": packet.dst,
+        "sport": packet.sport,
+        "dport": packet.dport,
+        "seq": packet.seq,
+        "ack": packet.ack,
+        "len": packet.payload_len if packet.payload_len >= 0 else None,
+        "flags": packet.flags,
+        "extra": {
+            "reason": "ack_stall_timeout",
+            "stall_ms": stall_ms,
+            "dup_acks": state.dup_ack_count,
+            "outstanding_segments": len(state.outstanding_segments),
+            "threshold_ms": threshold_ms,
+        },
+        "severity": "WARNING",
+    }
+    _attach_congestion_snapshot(event["extra"], state)
+    return event
 
 
 def _update_rtt(state: FlowState, sample_ms: float, alpha: float = 0.25) -> None:
@@ -416,6 +660,13 @@ def _build_flow_metrics(flow_states: Dict[str, FlowState]) -> List[Dict[str, Any
     return metrics
 
 
+def _stall_threshold_ms(state: FlowState) -> float:
+    if state.rtt_ema_ms is None:
+        return ACK_STALL_THRESHOLD_MS
+    dynamic = state.rtt_ema_ms * ACK_STALL_RTT_MULTIPLIER
+    return max(ACK_STALL_THRESHOLD_MS, dynamic)
+
+
 def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
     if pyshark is None:  # pragma: no cover - guarded at call-site
         raise RuntimeError("pyshark backend unavailable")
@@ -448,6 +699,7 @@ def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
                 ack = _int_field(getattr(tcp, "ack", None))
                 payload_len = _int_field(getattr(tcp, "len", None)) or 0
                 flags = _pyshark_flag_string(tcp)
+                window_size = _int_field(getattr(tcp, "window_size_value", None))
 
                 if None in (src, dst, sport, dport):
                     continue
@@ -462,6 +714,7 @@ def _iter_pyshark_packets(path: Path) -> Iterator[PacketInfo]:
                     ack=ack,
                     payload_len=payload_len,
                     flags=flags,
+                    window_size=window_size,
                 )
             except (AttributeError, ValueError, TypeError):
                 continue
@@ -501,6 +754,7 @@ def _iter_dpkt_packets(path: Path) -> Iterator[PacketInfo]:
                     ack=ack,
                     payload_len=payload_len,
                     flags=flags,
+                    window_size=getattr(tcp, "win", None),
                 )
             except (ValueError, AttributeError, dpkt.UnpackError):
                 continue

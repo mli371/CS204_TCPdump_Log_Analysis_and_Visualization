@@ -52,3 +52,49 @@ def test_ack_progress_resets_duplicate_counter() -> None:
     assert event is not None
     assert event["ack"] == 1500
     assert event["extra"]["dup_acks"] >= 3
+
+
+def test_ack_stall_infers_loss_event_after_timeout() -> None:
+    state = FlowState()
+    flow_id = "10.0.0.1:12345->10.0.0.2:80"
+
+    # Prime ACK tracking and outstanding data.
+    _maybe_infer_loss(state, _packet(0.0, 2000), flow_id)
+    state.outstanding_segments.append((2000, 2100, 0.0))
+    state.last_ack_progress_ts = 0.0
+
+    event = _maybe_infer_loss(state, _packet(0.5, 2000), flow_id)
+    assert event is not None
+    assert event["event"] == "loss_infer"
+    assert event["extra"]["reason"] == "ack_stall_timeout"
+
+
+def test_retransmission_without_dup_acks_infers_loss() -> None:
+    state = FlowState()
+    flow_id = "10.0.0.1:12345->10.0.0.2:80"
+
+    # Track last ACK and outstanding data to mirror a stalled flow without dup ACKs.
+    state.last_ack = 3000
+    state.last_ack_progress_ts = 0.0
+    state.outstanding_segments.append((3000, 3100, 0.0))
+    packet = PacketInfo(
+        ts=1.0,
+        src="10.0.0.1",
+        dst="10.0.0.2",
+        sport=12345,
+        dport=80,
+        seq=3000,
+        ack=None,
+        payload_len=100,
+        flags="A",
+    )
+
+    event = _maybe_infer_loss(state, packet, flow_id)
+    assert event is None  # no dup-ack or stall yet
+    # Simulate retransmission path calling timeout heuristic.
+    from src.parser.pcap_reader import _maybe_infer_retrans_timeout
+
+    timeout_event = _maybe_infer_retrans_timeout(state, packet, flow_id)
+    assert timeout_event is not None
+    assert timeout_event["event"] == "loss_infer"
+    assert timeout_event["extra"]["reason"] == "retransmission_without_dup_acks"

@@ -5,6 +5,8 @@
 ## Feature highlights
 - **Dual-backend parsing** (pyshark → dpkt fallback) with per-run benchmarking, backend selection, and skipped-packet tracking.
 - **Detectors & congestion proxies**: retransmission/out-of-order/loss inference plus cwnd/RTT estimators exposed in event metadata and summaries.
+- **Loss inference heuristics**: triple-duplicate-ACK detection, ACK-stall timeouts with adaptive thresholds, and retransmission-without-dup-ACK detection, all with cwnd/RTT snapshots for context.
+- **Control-plane anomalies**: repeated SYN without SYN-ACK, RST/FIN storms, and zero-window advertisements to catch handshake/teardown edge cases.
 - **Realtime monitoring**: sliding-window WARN/CRITICAL alerts, watchdog-based tailer, configurable thresholds and poll intervals.
 - **Visual workflow**: Plotly timeline, per-flow summary, combined dashboard (timeline + summary) generated via helper script.
 - **CLI-first tooling**: `parse-pcap`, `plot`, `summary`, `monitor`, and automation scripts (`watch_latest_capture.py`, `generate_dashboard.sh`).
@@ -58,6 +60,10 @@ python -m src.cli monitor \
 ```
 Environment variables `TCPVIZ_WINDOW`, `TCPVIZ_THRESHOLD`, `TCPVIZ_POLL_INTERVAL` override defaults. Sliding window alerts emit `[WARN]` (10–49), `[CRITICAL]` (≥50) severities (ANSI colours optional).
 
+Monitor thresholds per event type:
+- `TCPVIZ_THRESHOLD` (retransmissions), `TCPVIZ_LOSS_THRESHOLD` (loss inference), `TCPVIZ_OOO_THRESHOLD` (out-of-order). CLI options mirror these flags.
+- Alert lines include structured payloads alongside human-readable text for downstream pipelines.
+
 ## Rolling capture workflow (recommended)
 1. **Start a rolling capture** (Linux/WSL example):
    ```bash
@@ -81,6 +87,19 @@ Environment variables `TCPVIZ_WINDOW`, `TCPVIZ_THRESHOLD`, `TCPVIZ_POLL_INTERVAL
    scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
    ```
    Open `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html` in a browser.
+
+### Loss inference heuristics
+- **Triple duplicate ACKs**: emits `loss_infer` with `extra.reason=triple_duplicate_ack` once per ACK value.
+- **ACK stall timeout**: flags loss when ACK progress freezes while data is outstanding. The timeout uses the max of a floor (default 400ms) and an RTT-aware multiplier (default 4× smoothed RTT). See `ACK_STALL_THRESHOLD_MS` and `ACK_STALL_RTT_MULTIPLIER` in `src/parser/pcap_reader.py`.
+- **Retransmission without dup ACKs**: if a retransmission appears before dup-ACK thresholds are hit, a `loss_infer` is emitted with `extra.reason=retransmission_without_dup_acks`.
+- Timeline hover shows `extra_json` (reason, stall_ms/threshold_ms, cwnd/RTT snapshots). Summary charts aggregate by event type (not reason).
+- **Tuning**: adjust the two constants above or add CLI/env wiring if you need more aggressive timeouts on low-latency links; re-run `parse-pcap` after changes.
+
+### Handshake/teardown/zero-window anomalies
+- Repeated SYNs without SYN-ACK emit `handshake_anomaly` with retry count.
+- Multiple RST/FIN packets emit `teardown_anomaly` (storm detection).
+- Zero-window advertisements emit `zero_window` events.
+- These appear in timeline hovers via `extra_json` and in summary charts under their own event category.
 
 ### Windows capture handoff
 ```powershell
@@ -120,5 +139,6 @@ Relative to `Proposal.md` (“Real-Time TCPdump Log Analysis and Visualization�
 - CLI workflow (`parse-pcap`, `plot`, `summary`, `monitor`) with logging, env-configurable thresholds, consistent session directories.
 
 **Pending / future work**
-- Replace heuristic loss inference with additional signals (RTO-style detection, zero-window probes, SYN/FIN anomaly tracking) per NEXT_ACTIONS.md.
+- Tune and validate loss-anomaly heuristics on more captures (adjust ACK-stall/RTO thresholds, reduce false positives).
+- Add time-based handshake/teardown checks (e.g., missing SYN+ACK timers) and broaden validation pcaps.
 - Document verified runs on macOS/Windows beyond WSL (currently validated manually but not formally recorded).
