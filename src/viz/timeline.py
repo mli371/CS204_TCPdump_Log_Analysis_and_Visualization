@@ -39,6 +39,7 @@ def _to_plot_rows(events: Iterable[dict]) -> List[dict]:
                 "timestamp": float(ts),
                 "flow_id": str(flow_id),
                 "event": str(event_type),
+                "severity": event.get("severity", "INFO"),
                 "seq": event.get("seq"),
                 "ack": event.get("ack"),
                 "len": event.get("len"),
@@ -72,24 +73,36 @@ def render(events_path: str | Path, output_dir: str | Path | None = None) -> Pat
         LOGGER.info("No events available for %s; wrote placeholder timeline to %s", events_path, output_path)
         return output_path
 
+    # Define discrete color map for severity levels
+    severity_colors = {
+        "CRITICAL": "#dc3545",  # Red
+        "WARNING": "#fd7e14",   # Orange
+        "INFO": "#0d6efd",      # Blue
+    }
+
     fig = px.scatter(
         rows,
         x="timestamp",
         y="flow_id",
-        color="event",
+        color="severity",
         symbol="event",
+        color_discrete_map=severity_colors,
         hover_data={
             "timestamp": True,
             "flow_id": True,
             "event": True,
-        "seq": True,
-        "ack": True,
-        "len": True,
-        "flags": True,
-        "extra_json": True,
+            "severity": True,
+            "seq": True,
+            "ack": True,
+            "len": True,
+            "flags": True,
+            "extra_json": True,
         },
-        category_orders={"event": sorted({row["event"] for row in rows})},
-        labels={"timestamp": "Timestamp (s)", "flow_id": "Flow"},
+        category_orders={
+            "event": sorted({row["event"] for row in rows}),
+            "severity": ["CRITICAL", "WARNING", "INFO"],
+        },
+        labels={"timestamp": "Timestamp (s)", "flow_id": "Flow", "severity": "Severity"},
         title="tcpviz timeline",
     )
 

@@ -30,8 +30,9 @@ except ImportError:  # pragma: no cover - optional dependency
 _BACKEND_WARNINGS_EMITTED: set[str] = set()
 LOGGER = get_logger(__name__)
 DUP_ACK_THRESHOLD = 3
-ACK_STALL_THRESHOLD_MS = 400.0
-ACK_STALL_RTT_MULTIPLIER = 4.0
+ACK_STALL_THRESHOLD_MS = 200.0
+ACK_STALL_RTT_MULTIPLIER = 3.0
+SYN_TIMEOUT_SECONDS = 3.0
 
 
 def _log_backend(message: str, level: int = logging.INFO) -> None:
@@ -53,6 +54,7 @@ class Event:
     ack: Optional[int]
     length: Optional[int]
     flags: Optional[str]
+    severity: str = "INFO"
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -77,6 +79,7 @@ class FlowState:
     rtt_ema_ms: Optional[float] = None
     rtt_sample_count: int = 0
     syn_seen: bool = False
+    syn_ts: Optional[float] = None
     syn_ack_seen: bool = False
     syn_retry_count: int = 0
     syn_anomaly_reported: bool = False
@@ -402,6 +405,7 @@ def _maybe_infer_loss(state: FlowState, packet: PacketInfo, flow_id: str) -> Opt
                 "reason": "triple_duplicate_ack",
                 "dup_acks": state.dup_ack_count,
             },
+            "severity": "WARNING",
         }
         _attach_congestion_snapshot(event["extra"], state)
         return event
@@ -462,6 +466,7 @@ def _maybe_infer_retrans_timeout(
             "stall_ms": stall_ms,
             "threshold_ms": threshold_ms,
         },
+        "severity": "WARNING",
     }
     _attach_congestion_snapshot(event["extra"], state)
     return event
@@ -476,6 +481,7 @@ def _maybe_emit_control_plane_anomalies(
     if "S" in flags and "A" not in flags:
         if not state.syn_seen:
             state.syn_seen = True
+            state.syn_ts = packet.ts
             state.syn_retry_count = 1
         else:
             state.syn_retry_count += 1
@@ -486,12 +492,27 @@ def _maybe_emit_control_plane_anomalies(
                     flow_id,
                     reason="syn_retry_without_synack",
                     retries=state.syn_retry_count,
+                    severity="CRITICAL",
                 )
                 _attach_congestion_snapshot(event["extra"], state)
                 emitted.append(event)
                 state.syn_anomaly_reported = True
     if "S" in flags and "A" in flags:
         state.syn_ack_seen = True
+
+    if state.syn_seen and not state.syn_ack_seen and not state.syn_anomaly_reported:
+        if state.syn_ts is not None and (packet.ts - state.syn_ts) > SYN_TIMEOUT_SECONDS:
+            event = _build_event(
+                "handshake_anomaly",
+                packet,
+                flow_id,
+                reason="syn_timeout",
+                timeout_threshold=SYN_TIMEOUT_SECONDS,
+                severity="CRITICAL",
+            )
+            _attach_congestion_snapshot(event["extra"], state)
+            emitted.append(event)
+            state.syn_anomaly_reported = True
 
     if "R" in flags:
         state.rst_count += 1
@@ -502,6 +523,7 @@ def _maybe_emit_control_plane_anomalies(
                 flow_id,
                 reason="rst_storm",
                 rst_count=state.rst_count,
+                severity="WARNING",
             )
             _attach_congestion_snapshot(event["extra"], state)
             emitted.append(event)
@@ -516,6 +538,7 @@ def _maybe_emit_control_plane_anomalies(
                 flow_id,
                 reason="fin_storm",
                 fin_count=state.fin_count,
+                severity="WARNING",
             )
             _attach_congestion_snapshot(event["extra"], state)
             emitted.append(event)
@@ -529,6 +552,7 @@ def _maybe_emit_control_plane_anomalies(
             flow_id,
             reason="zero_window_advertisement",
             zero_window_count=state.zero_window_count,
+            severity="WARNING",
         )
         _attach_congestion_snapshot(event["extra"], state)
         emitted.append(event)
@@ -540,6 +564,7 @@ def _build_event(
     name: str,
     packet: PacketInfo,
     flow_id: str,
+    severity: str = "INFO",
     **extra_fields: Any,
 ) -> Dict[str, Any]:
     extra: Dict[str, Any] = {"reason": extra_fields.pop("reason", None)}
@@ -556,6 +581,7 @@ def _build_event(
         "ack": packet.ack,
         "len": packet.payload_len if packet.payload_len >= 0 else None,
         "flags": packet.flags,
+        "severity": severity,
         "extra": extra,
     }
     return event
@@ -596,6 +622,7 @@ def _maybe_emit_ack_stall(
             "outstanding_segments": len(state.outstanding_segments),
             "threshold_ms": threshold_ms,
         },
+        "severity": "WARNING",
     }
     _attach_congestion_snapshot(event["extra"], state)
     return event

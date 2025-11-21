@@ -1,0 +1,20 @@
+Processed 280 packets (TCP: 280, skipped: 0)
+Wrote 9 events to /home/mingyang/MSproject/CS204/tcpviz/artifacts/session_20251120_1259/events.jsonl
+Session directory: /home/mingyang/MSproject/CS204/tcpviz/artifacts/session_20251120_1259
+Backend: pyshark
+Event counts:
+  retransmission: 0
+  out_of_order: 0
+  loss_infer: 9
+  handshake_anomaly: 0
+  teardown_anomaly: 0
+  zero_window: 0
+Top flows by event volume:
+  172.31.18.104:22->172.31.16.1:61736 -> 5 [loss_infer:5]
+  172.31.18.104:22->172.31.16.1:61872 -> 2 [loss_infer:2]
+  172.31.18.104:22->172.31.16.1:61774 -> 1 [loss_infer:1]
+Sample flow congestion metrics:
+  172.31.18.104:22->172.31.16.1:61774: avg_rtt_ms=None current_cwnd_bytes=4644 max_cwnd_bytes=4644
+  172.31.18.104:22->172.31.16.1:61736: avg_rtt_ms=806.6341073025033 current_cwnd_bytes=2792 max_cwnd_bytes=2792
+  172.31.18.104:22->172.31.16.1:61872: avg_rtt_ms=None current_cwnd_bytes=1164 max_cwnd_bytes=1164
+
