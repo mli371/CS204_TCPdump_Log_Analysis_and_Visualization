@@ -69,6 +69,7 @@ Monitor thresholds per event type:
    ```bash
    dumpcap -i eth0 -b filesize:50 -b files:10 -w /tmp/CS204/rolling.pcapng
    ```
+  > Tip: replace `eth0` with the interface name returned by `dumpcap -D` on your host (e.g., `en0`, `wlan0`).
 2. **Maintain a stable symlink** to the newest file:
    ```bash
    mkdir -p ~/tcpviz-links
@@ -76,6 +77,12 @@ Monitor thresholds per event type:
      "/tmp/CS204/rolling_*.pcapng" \
      ~/tcpviz-links/rolling-current.pcapng
    ```
+  > **Non-VM macOS tip:** When `dumpcap` runs with `sudo`, the rotated files under `/tmp/CS204/` are owned by root, while `monitor` normally runs as your user. Stop the capture/watcher terminals (Ctrl+C), then fix ownership before restarting:
+  > ```bash
+  > sudo chown -R <your-user>:staff /private/tmp/CS204
+  > sudo chmod a+r /private/tmp/CS204/rolling_*.pcapng
+  > ```
+  > Restart the watcher and `monitor` afterwards to avoid permission errors when tailing the capture.
 3. **Run the monitor** against the symlink:
    ```bash
    python -m src.cli monitor \
