@@ -70,7 +70,11 @@ Monitor thresholds per event type:
    mkdir /tmp/CS204
    dumpcap -i eth0 -b filesize:800 -b files:80 -w /tmp/CS204/rolling.pcapng
    ```
+<<<<<<< HEAD
   > Tip: replace `eth0` with the interface name returned by `dumpcap -D` on your host (e.g., `en0`, `wlan0`).
+=======
+   /tmp/CS204 need to be created before running.
+>>>>>>> 4d7f1a1 (update docs)
 2. **Maintain a stable symlink** to the newest file:
    ```bash
    mkdir -p ~/tcpviz-links
@@ -86,12 +90,22 @@ Monitor thresholds per event type:
   > Restart the watcher and `monitor` afterwards to avoid permission errors when tailing the capture.
 3. **Run the monitor** against the symlink:
    ```bash
+<<<<<<< HEAD
    python -m src.cli monitor --pcap-path ~/tcpviz-links/rolling-current.pcapng --window 120 --threshold 5
    ```
 4. **Generate dashboards** from the same capture:
    ```bash
    TCPVIZ_WAIT_ATTEMPTS=60 TCPVIZ_STABLE_ATTEMPTS=60 TCPVIZ_WAIT_DELAY=1 scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
 
+=======
+   python -m src.cli monitor \
+     --pcap-path ../tcpviz-links/rolling-current.pcapng \
+     --window 60 --threshold 10
+   ```
+4. **Generate dashboards** from the same capture:
+   ```bash
+   scripts/generate_dashboard.sh ../tcpviz-links/rolling-current.pcapng
+>>>>>>> 4d7f1a1 (update docs)
    ```
    Open `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html` in a browser.
 
