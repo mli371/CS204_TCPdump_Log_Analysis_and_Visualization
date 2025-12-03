@@ -67,7 +67,8 @@ Monitor thresholds per event type:
 ## Rolling capture workflow (recommended)
 1. **Start a rolling capture** (Linux/WSL example):
    ```bash
-   dumpcap -i eth0 -b filesize:50 -b files:10 -w /tmp/CS204/rolling.pcapng
+   mkdir /tmp/CS204
+   dumpcap -i eth0 -b filesize:800 -b files:80 -w /tmp/CS204/rolling.pcapng
    ```
   > Tip: replace `eth0` with the interface name returned by `dumpcap -D` on your host (e.g., `en0`, `wlan0`).
 2. **Maintain a stable symlink** to the newest file:
@@ -85,15 +86,31 @@ Monitor thresholds per event type:
   > Restart the watcher and `monitor` afterwards to avoid permission errors when tailing the capture.
 3. **Run the monitor** against the symlink:
    ```bash
-   python -m src.cli monitor \
-     --pcap-path ~/tcpviz-links/rolling-current.pcapng \
-     --window 60 --threshold 10
+   python -m src.cli monitor --pcap-path ~/tcpviz-links/rolling-current.pcapng --window 120 --threshold 5
    ```
 4. **Generate dashboards** from the same capture:
    ```bash
-   scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
+   TCPVIZ_WAIT_ATTEMPTS=60 TCPVIZ_STABLE_ATTEMPTS=60 TCPVIZ_WAIT_DELAY=1 scripts/generate_dashboard.sh ~/tcpviz-links/rolling-current.pcapng
+
    ```
    Open `artifacts/session_<timestamp>/timeline.html`, `summary.html`, and `report.html` in a browser.
+
+## Netem CLI (ingress/egress impairment)
+Apply or clear tc/netem profiles via the built-in CLI (requires root). Replace `eth0` with your interface. If `sudo python` is not found, use the wrapper `scripts/netem_cli.sh` (inherits your PATH/PYTHONPATH).
+```bash
+# 300ms delay + 10% loss on egress
+scripts/netem_cli.sh -i eth0 --delay 300 --loss 10
+
+# Ingress shaping via IFB: delay+jitter+loss+reorder to affect downloads
+scripts/netem_cli.sh -i eth0 --ingress --delay 200 --jitter 80 --loss 10 --reorder 20
+
+# Rate limit 1mbit with netem (HTB parent + netem child)
+scripts/netem_cli.sh -i eth0 --rate 1mbit --delay 100 --loss 5
+
+# Restore to normal
+scripts/netem_cli.sh -i eth0 --restore
+```
+> WSL2 note: if `RTNETLINK answers: Operation not supported` appears, run these on a full Linux VM/host.
 
 ### Loss inference heuristics
 - **Triple duplicate ACKs**: emits `loss_infer` with `extra.reason=triple_duplicate_ack` once per ACK value.
@@ -111,7 +128,7 @@ Monitor thresholds per event type:
 ### Windows capture handoff
 ```powershell
 tshark -D
-dumpcap -i <ID> -b filesize:50 -b files:10 -w C:\pcaps\rolling.pcapng
+dumpcap -i <ID> -b filesize:200 -b files:30 -w C:\pcaps\rolling.pcapng
 ```
 Share `C:\pcaps` into WSL (e.g. `/mnt/c/pcaps`) so the monitor tailer can read it.
 

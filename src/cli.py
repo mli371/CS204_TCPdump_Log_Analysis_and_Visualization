@@ -34,6 +34,7 @@ from tcpviz.src.parser import parse_pcap
 from tcpviz.src.realtime import SlidingWindowMonitor, tail_pcaps
 from tcpviz.src.viz import render as render_timeline
 from tcpviz.src.viz import render_summary as render_summary_chart
+from tcpviz.src.netem import apply_netem, restore_netem, NetemError
 
 LOGGER = get_logger(__name__)
 
@@ -254,6 +255,64 @@ def monitor_command(
             monitor.maybe_alert(ts)
     except KeyboardInterrupt:
         click.echo("Stopped monitoring.")
+
+
+@cli.command("netem")
+@click.option("--interface", "-i", required=True, help="Network interface to shape (e.g., eth0)")
+@click.option("--delay", type=float, help="Base delay in ms (applied via netem)")
+@click.option("--jitter", type=float, help="Jitter in ms (optional, pairs with delay)")
+@click.option("--loss", type=float, help="Packet loss percentage (e.g., 5 for 5%)")
+@click.option("--reorder", type=float, help="Packet reordering percentage (e.g., 20 for 20%)")
+@click.option("--rate", type=str, help="Rate limit (e.g., '1mbit'); uses HTB to combine with netem")
+@click.option("--burst", type=str, default="32kbit", show_default=True, help="Burst size for rate limiting (with --rate)")
+@click.option("--latency", type=str, default="400ms", show_default=True, help="Latency for token bucket (with --rate)")
+@click.option("--ingress", is_flag=True, default=False, help="Apply to ingress via IFB redirection")
+@click.option("--ifb", type=str, default="ifb0", show_default=True, help="IFB device name when using --ingress")
+@click.option("--restore", "restore_only", is_flag=True, default=False, help="Restore interface to normal (remove netem/htb)")
+def netem_command(
+    interface: str,
+    delay: float | None,
+    jitter: float | None,
+    loss: float | None,
+    reorder: float | None,
+    rate: str | None,
+    burst: str,
+    latency: str,
+    ingress: bool,
+    ifb: str,
+    restore_only: bool,
+) -> None:
+    """Apply or clear tc/netem impairments for testing."""
+
+    if restore_only:
+        restore_netem(interface, ifb=ifb)
+        click.echo(f"Restored {interface} (and {ifb} if present).")
+        return
+
+    if not any(param is not None for param in (delay, jitter, loss, reorder, rate)):
+        raise click.UsageError("Specify at least one impairment option (delay/jitter/loss/reorder/rate) or use --restore.")
+
+    try:
+        apply_netem(
+            interface=interface,
+            delay_ms=delay,
+            jitter_ms=jitter,
+            loss_pct=loss,
+            reorder_pct=reorder,
+            rate=rate,
+            burst=burst,
+            latency=latency,
+            ingress=ingress,
+            ifb=ifb,
+        )
+    except NetemError as exc:
+        raise click.ClickException(str(exc))
+
+    mode = "ingress" if ingress else "egress"
+    click.echo(
+        f"Applied netem on {interface} ({mode}) "
+        f"delay={delay}ms jitter={jitter}ms loss={loss}% reorder={reorder}% rate={rate}"
+    )
 
 
 if __name__ == "__main__":

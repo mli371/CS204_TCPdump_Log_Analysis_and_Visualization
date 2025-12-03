@@ -11,9 +11,20 @@ from pathlib import Path
 
 def _newest_file(pattern: str) -> Path | None:
     paths = [Path(p).expanduser().resolve() for p in glob.glob(pattern)]
-    if not paths:
-        return None
-    return max(paths, key=lambda p: p.stat().st_mtime)
+    newest: Path | None = None
+    newest_mtime: float | None = None
+
+    for path in paths:
+        try:
+            mtime = path.stat().st_mtime
+        except FileNotFoundError:
+            # File may rotate between glob and stat; skip it.
+            continue
+        if newest_mtime is None or mtime > newest_mtime:
+            newest = path
+            newest_mtime = mtime
+
+    return newest
 
 
 def main() -> None:

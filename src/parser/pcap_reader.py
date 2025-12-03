@@ -9,8 +9,15 @@ from dataclasses import asdict, dataclass, field
 import ipaddress
 from collections import deque
 from pathlib import Path
+import sys
 from time import perf_counter
 from typing import Any, Callable, Deque, Dict, Iterator, List, MutableMapping, Optional, Tuple
+
+# Ensure the repository root is on sys.path so absolute imports work even when pytest
+# is invoked on this module directly (e.g., `pytest src/parser/pcap_reader.py`).
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.logging_utils import get_logger
 from src.detectors.out_of_order import advance_max_contig, detect_out_of_order
@@ -329,19 +336,21 @@ def _close_iterator(packet_iter: Iterator[PacketInfo]) -> None:
 def _backend_iterators(path: Path) -> List[Tuple[str, Callable[[], Iterator[PacketInfo]]]]:
     factories: List[Tuple[str, Callable[[], Iterator[PacketInfo]]]] = []
 
-    if pyshark is not None:
-        factories.append(("pyshark", lambda p=path: _iter_pyshark_packets(p)))
-    else:
-        if "pyshark_missing" not in _BACKEND_WARNINGS_EMITTED:
-            _log_backend("pyshark backend unavailable (module not installed); falling back to dpkt")
-            _BACKEND_WARNINGS_EMITTED.add("pyshark_missing")
-
     if dpkt is not None:
         factories.append(("dpkt", lambda p=path: _iter_dpkt_packets(p)))
     else:
         if "dpkt_missing" not in _BACKEND_WARNINGS_EMITTED:
             _log_backend("dpkt backend unavailable; TCP parsing will be limited")
             _BACKEND_WARNINGS_EMITTED.add("dpkt_missing")
+
+    # Only use pyshark if dpkt is missing. 
+    # pyshark is unstable under high load (asyncio crashes) and slower.
+    if dpkt is None and pyshark is not None:
+        factories.append(("pyshark", lambda p=path: _iter_pyshark_packets(p)))
+    elif pyshark is None:
+        if "pyshark_missing" not in _BACKEND_WARNINGS_EMITTED:
+            _log_backend("pyshark backend unavailable (module not installed)")
+            _BACKEND_WARNINGS_EMITTED.add("pyshark_missing")
 
     return factories
 
@@ -737,11 +746,27 @@ def _iter_dpkt_packets(path: Path) -> Iterator[PacketInfo]:
 
         datalink = getattr(reader, "datalink", lambda: dpkt.pcap.DLT_EN10MB)()
 
-        for ts, buf in reader:
+        iterator = iter(reader)
+        while True:
             try:
-                src, dst, sport, dport, seq, ack, payload_len, flags = _decode_dpkt_frame(
-                    datalink, buf
-                )
+                ts, buf = next(iterator)
+            except StopIteration:
+                break
+            except dpkt.dpkt.NeedData:
+                LOGGER.warning("dpkt encountered truncated packet in %s; stopping parse early", path)
+                break
+            try:
+                (
+                    src,
+                    dst,
+                    sport,
+                    dport,
+                    seq,
+                    ack,
+                    payload_len,
+                    flags,
+                    window_size,
+                ) = _decode_dpkt_frame(datalink, buf)
                 if src is None:
                     continue
                 yield PacketInfo(
@@ -754,7 +779,7 @@ def _iter_dpkt_packets(path: Path) -> Iterator[PacketInfo]:
                     ack=ack,
                     payload_len=payload_len,
                     flags=flags,
-                    window_size=getattr(tcp, "win", None),
+                    window_size=window_size,
                 )
             except (ValueError, AttributeError, dpkt.UnpackError):
                 continue
@@ -763,9 +788,19 @@ def _iter_dpkt_packets(path: Path) -> Iterator[PacketInfo]:
 def _decode_dpkt_frame(
     datalink: int,
     buf: bytes,
-) -> Tuple[Optional[str], Optional[str], int, int, Optional[int], Optional[int], int, Optional[str]]:
+) -> Tuple[
+    Optional[str],
+    Optional[str],
+    int,
+    int,
+    Optional[int],
+    Optional[int],
+    int,
+    Optional[str],
+    Optional[int],
+]:
     if dpkt is None:  # pragma: no cover - guarded at call-site
-        return None, None, 0, 0, None, None, 0, None
+        return None, None, 0, 0, None, None, 0, None, None
 
     ip = None
     if datalink == dpkt.pcap.DLT_EN10MB:
@@ -780,23 +815,24 @@ def _decode_dpkt_frame(
         ip = eth.data
 
     if not isinstance(ip, (dpkt.ip.IP, dpkt.ip6.IP6)):
-        return None, None, 0, 0, None, None, 0, None
+        return None, None, 0, 0, None, None, 0, None, None
 
     tcp = ip.data
     if not isinstance(tcp, dpkt.tcp.TCP):
-        return None, None, 0, 0, None, None, 0, None
+        return None, None, 0, 0, None, None, 0, None, None
 
     src = _format_ip(ip.src)
     dst = _format_ip(ip.dst)
     if src is None or dst is None:
-        return None, None, 0, 0, None, None, 0, None
+        return None, None, 0, 0, None, None, 0, None, None
 
     seq = int(tcp.seq)
     ack = int(tcp.ack) if tcp.flags & dpkt.tcp.TH_ACK else None
     payload_len = len(tcp.data)
     flags = _dpkt_flag_string(tcp.flags)
+    window_size = getattr(tcp, "win", None)
 
-    return src, dst, tcp.sport, tcp.dport, seq, ack, payload_len, flags
+    return src, dst, tcp.sport, tcp.dport, seq, ack, payload_len, flags, window_size
 
 
 def _pyshark_flag_string(tcp_layer: Any) -> Optional[str]:
